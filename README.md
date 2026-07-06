@@ -31,7 +31,7 @@ npm run dev
 | Name | Value |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Anthropic Consoleで発行した秘密鍵 |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514`（必要に応じて変更） |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6`（必要に応じて変更） |
 
 4. Production / Preview / Developmentの必要な環境にチェックしてDeployします。
 

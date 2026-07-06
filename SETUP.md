@@ -6,7 +6,7 @@
 
 ## ② APIキーを安全に入力
 
-`Copy-Item .env.example .env.local` を実行し、`.env.local` の `ANTHROPIC_API_KEY` を実際のキーへ書き換えます。APIキーを `api/analyze.js` へ直接書かないでください。
+`Copy-Item .env.example .env.local` を実行し、`.env.local` の `ANTHROPIC_API_KEY` を実際のキーへ書き換えます。モデルには `claude-sonnet-4-6` を指定します。APIキーを `api/analyze.js` へ直接書かないでください。
 
 ## ③ Vercelへデプロイ
 
