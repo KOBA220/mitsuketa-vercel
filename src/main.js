@@ -1,7 +1,10 @@
 import './style.css';
 import './fix.css';
+import './preview.css';
+import './word-preview.css';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth/mammoth.browser';
+import { renderAsync as renderDocx } from 'docx-preview';
 
 const app = document.querySelector('#app');
 const state = { oldFile: null, newFile: null, result: null, sensitivity: 28, minArea: 10 };
@@ -71,7 +74,7 @@ compareBtn.addEventListener('click', async () => {
     if (state.oldFile.type.startsWith('image/')) await compareImages();
     else if (/\.docx$/i.test(state.oldFile.name)) await compareDocuments();
     else await compareSheets();
-    wireAi(); resultEl.hidden = false; resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    wireAi(true); wirePreviewSync(); resultEl.hidden = false; resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (err) { showError(err.message); }
   finally { compareBtn.classList.remove('loading'); compareBtn.querySelector('span').textContent = 'もう一度比較する'; compareBtn.disabled = false; }
 });
@@ -94,20 +97,21 @@ async function compareImages() {
   }
   const expanded = dilate(mask, w, h, 2);
   const boxes = components(expanded, w, h).filter(x => x.area >= state.minArea).map(x => ({...x, pad: 9}));
-  const url = URL.createObjectURL(state.newFile);
+  const oldUrl = URL.createObjectURL(state.oldFile), newUrl = URL.createObjectURL(state.newFile);
   resultEl.innerHTML = resultHeader(boxes.length, '画像上の変更候補') + `
-    <div class="image-result">
-      <div class="preview-card"><div class="preview-label">NEW / 変更箇所</div><div class="image-wrap"><img id="resultImage" src="${url}" alt="新しい画像"><canvas id="markCanvas"></canvas></div></div>
-      <aside class="summary"><h3>検出結果</h3><div class="big-number">${boxes.length}<small>箇所</small></div><p>赤丸は画素の変化をまとめた領域です。細かな印刷差や圧縮ノイズも候補に含まれる場合があります。</p><label>検出感度<input id="sensitivity" type="range" min="8" max="70" value="${state.sensitivity}"></label><button id="downloadBtn" class="secondary">赤丸画像を保存</button></aside>
-    </div>`;
-  const img = document.querySelector('#resultImage');
-  await img.decode(); drawMarks(img, boxes, w, h);
-  document.querySelector('#sensitivity').addEventListener('change', e => { state.sensitivity = +e.target.value; compareImages(); });
-  document.querySelector('#downloadBtn').addEventListener('click', () => downloadMarked(img, boxes, w, h));
+    <div class="compare-preview image-compare">
+      <div class="preview-card old-preview"><div class="preview-label">OLD / 旧</div><div class="image-wrap"><img id="oldResultImage" src="${oldUrl}" alt="旧画像"><canvas id="oldMarkCanvas"></canvas></div></div>
+      <div class="preview-card new-preview"><div class="preview-label">NEW / 新</div><div class="image-wrap"><img id="newResultImage" src="${newUrl}" alt="新画像"><canvas id="newMarkCanvas"></canvas></div></div>
+    </div>
+    <div class="preview-tools"><p><b>${boxes.length}箇所</b>の違いを両方の画像上に赤丸で表示しています。</p><label>検出感度<input id="sensitivity" type="range" min="8" max="70" value="${state.sensitivity}"></label><button id="downloadBtn" class="secondary">新画像を赤丸付きで保存</button></div>${aiPanel()}`;
+  const oldResult = document.querySelector('#oldResultImage'), newResult = document.querySelector('#newResultImage');
+  await Promise.all([oldResult.decode(),newResult.decode()]); drawMarks('oldMarkCanvas', boxes, w, h); drawMarks('newMarkCanvas', boxes, w, h);
+  document.querySelector('#sensitivity').addEventListener('change', async e => { state.sensitivity = +e.target.value; await compareImages(); wireAi(); });
+  document.querySelector('#downloadBtn').addEventListener('click', () => downloadMarked(newResult, boxes, w, h));
 }
 
-function drawMarks(img, boxes, w, h) {
-  const c = document.querySelector('#markCanvas'); c.width = w; c.height = h;
+function drawMarks(canvasId, boxes, w, h) {
+  const c = document.querySelector(`#${canvasId}`); c.width = w; c.height = h;
   const ctx = c.getContext('2d'); ctx.clearRect(0,0,w,h); ctx.strokeStyle='#ef3d31'; ctx.lineWidth=Math.max(3,w/180); ctx.setLineDash([12,5]);
   boxes.forEach((b,i) => { const p=b.pad; ctx.beginPath(); ctx.ellipse((b.minX+b.maxX)/2,(b.minY+b.maxY)/2,(b.maxX-b.minX)/2+p,(b.maxY-b.minY)/2+p,0,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#ef3d31'; ctx.beginPath(); ctx.arc(b.minX-p,b.minY-p,12,0,Math.PI*2); ctx.fill(); ctx.fillStyle='white'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center'; ctx.fillText(i+1,b.minX-p,b.minY-p+4); ctx.setLineDash([12,5]); });
 }
@@ -116,8 +120,27 @@ async function compareDocuments() {
   const [a,b] = await Promise.all([state.oldFile.arrayBuffer(), state.newFile.arrayBuffer()]);
   const [oldDoc,newDoc] = await Promise.all([mammoth.extractRawText({arrayBuffer:a}), mammoth.extractRawText({arrayBuffer:b})]);
   state.aiPayload = { kind:'text', old:oldDoc.value, new:newDoc.value };
-  renderLineDiff(oldDoc.value, newDoc.value, 'Word文書の変更');
+  resultEl.innerHTML=resultHeader('…','Word文書の変更')+`<div class="compare-preview word-compare"><div class="paper-preview"><div class="paper-label old-label">OLD / 旧</div><div class="word-scroll sync-scroll"><div id="oldWordPreview" class="word-host"></div></div></div><div class="paper-preview"><div class="paper-label new-label">NEW / 新</div><div class="word-scroll sync-scroll"><div id="newWordPreview" class="word-host"></div></div></div></div>${aiPanel()}`;
+  const options={inWrapper:true,ignoreWidth:false,ignoreHeight:false,ignoreFonts:false,breakPages:true,useBase64URL:true,renderHeaders:true,renderFooters:true,renderFootnotes:true};
+  await Promise.all([renderDocx(a,document.querySelector('#oldWordPreview'),undefined,options),renderDocx(b,document.querySelector('#newWordPreview'),undefined,options)]);
+  const changed=markWordDifferences(document.querySelector('#oldWordPreview'),document.querySelector('#newWordPreview'));
+  const count=document.querySelector('.result-count b');if(count)count.textContent=changed;
 }
+
+function markWordDifferences(oldHost,newHost){
+  const blocks=host=>[...host.querySelectorAll('p,td')].filter(el=>el.tagName==='TD'||!el.closest('td')).map(el=>({el,text:normalizeBlock(el.textContent)})).filter(x=>x.text);
+  const oldBlocks=blocks(oldHost),newBlocks=blocks(newHost),pairs=alignBlocks(oldBlocks,newBlocks);let number=0;
+  pairs.forEach(pair=>{if(pair.same)return;number++;if(pair.old)markWordBlock(pair.old.el,'word-removed',number);if(pair.new)markWordBlock(pair.new.el,'word-added',number)});
+  return number;
+}
+function normalizeBlock(text){return String(text||'').replace(/[\s\u00a0]+/g,' ').trim()}
+function alignBlocks(oldBlocks,newBlocks){
+  const n=oldBlocks.length,m=newBlocks.length,dp=Array.from({length:n+1},()=>new Uint16Array(m+1));
+  for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)dp[i][j]=oldBlocks[i].text===newBlocks[j].text?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+  const out=[];let i=0,j=0,pendingOld=[],pendingNew=[];const flush=()=>{const len=Math.max(pendingOld.length,pendingNew.length);for(let k=0;k<len;k++)out.push({old:pendingOld[k]||null,new:pendingNew[k]||null,same:false});pendingOld=[];pendingNew=[]};
+  while(i<n&&j<m){if(oldBlocks[i].text===newBlocks[j].text){flush();out.push({old:oldBlocks[i++],new:newBlocks[j++],same:true})}else if(dp[i+1][j]>=dp[i][j+1])pendingOld.push(oldBlocks[i++]);else pendingNew.push(newBlocks[j++])}while(i<n)pendingOld.push(oldBlocks[i++]);while(j<m)pendingNew.push(newBlocks[j++]);flush();return out;
+}
+function markWordBlock(el,className,number){el.classList.add('word-difference',className);const pin=document.createElement('span');pin.className='word-diff-pin';pin.textContent=number;pin.setAttribute('aria-label',`差分 ${number}`);el.appendChild(pin)}
 
 async function compareSheets() {
   const [a,b] = await Promise.all([state.oldFile.arrayBuffer(), state.newFile.arrayBuffer()]);
@@ -128,19 +151,23 @@ async function compareSheets() {
     const newRows=newWb.Sheets[name]?XLSX.utils.sheet_to_json(newWb.Sheets[name],{header:1,defval:''}):[];
     oldAi += `\n【${name}】\n` + oldRows.map(r=>r.join('\t')).join('\n'); newAi += `\n【${name}】\n` + newRows.map(r=>r.join('\t')).join('\n');
     const rows=Math.max(oldRows.length,newRows.length), cols=Math.max(0,...oldRows.map(r=>r.length),...newRows.map(r=>r.length));
-    let body='';
-    for(let r=0;r<rows;r++){ body+='<tr><th>'+ (r+1) +'</th>'; for(let c=0;c<cols;c++){const ov=oldRows[r]?.[c]??'',nv=newRows[r]?.[c]??'',diff=String(ov)!==String(nv); if(diff)changed++; body+=`<td class="${diff?'changed':''}" title="${diff?'旧: '+esc(ov):''}">${esc(nv)}${diff?`<span class="old-value">旧: ${esc(ov)||'（空白）'}</span>`:''}</td>`;} body+='</tr>'; }
-    html+=`<section class="sheet"><h3>${esc(name)}</h3><div class="table-scroll"><table><thead><tr><th></th>${Array.from({length:cols},(_,i)=>`<th>${columnName(i)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(String(oldRows[r]?.[c]??'')!==String(newRows[r]?.[c]??''))changed++;
+    html+=`<section class="sheet"><h3>${esc(name)}</h3><div class="compare-preview sheet-compare"><div class="paper-preview"><div class="paper-label old-label">OLD / 旧</div><div class="table-scroll sync-scroll">${sheetTable(oldRows,newRows,rows,cols,'old')}</div></div><div class="paper-preview"><div class="paper-label new-label">NEW / 新</div><div class="table-scroll sync-scroll">${sheetTable(newRows,oldRows,rows,cols,'new')}</div></div></div></section>`;
   });
-  resultEl.innerHTML=resultHeader(changed,'変更セル')+html;
+  resultEl.innerHTML=resultHeader(changed,'変更セル')+html+aiPanel();
   state.aiPayload = { kind:'text', old:oldAi, new:newAi };
 }
 
 function renderLineDiff(oldText,newText,label){
   const oldLines=oldText.split(/\r?\n/),newLines=newText.split(/\r?\n/), ops=diffLines(oldLines,newLines); let changed=0;
-  const rows=ops.map(op=>{if(op.type!=='same')changed++; return `<div class="diff-row ${op.type}"><span>${op.oldNo||''}</span><span>${op.newNo||''}</span><i>${op.type==='add'?'+':op.type==='del'?'−':' '}</i><p>${esc(op.text)||'&nbsp;'}</p></div>`}).join('');
-  resultEl.innerHTML=resultHeader(changed,label)+`<div class="legend"><b class="add">追加</b><b class="del">削除</b></div><div class="document-diff">${rows}</div>`;
+  let oldHtml='',newHtml='';
+  alignDiffOps(ops).forEach(row=>{if(row.changed)changed++;oldHtml+=`<div class="paper-line ${row.old&&row.changed?'marked removed':!row.old?'blank':''}"><span>${row.old?.oldNo||''}</span><p>${row.old?esc(row.old.text)||'&nbsp;':'&nbsp;'}</p></div>`;newHtml+=`<div class="paper-line ${row.new&&row.changed?'marked added':!row.new?'blank':''}"><span>${row.new?.newNo||''}</span><p>${row.new?esc(row.new.text)||'&nbsp;':'&nbsp;'}</p></div>`});
+  resultEl.innerHTML=resultHeader(changed,label)+`<div class="compare-preview document-compare"><div class="paper-preview"><div class="paper-label old-label">OLD / 旧</div><div class="document-page sync-scroll">${oldHtml}</div></div><div class="paper-preview"><div class="paper-label new-label">NEW / 新</div><div class="document-page sync-scroll">${newHtml}</div></div></div>${aiPanel()}`;
 }
+
+function alignDiffOps(ops){const rows=[];for(let i=0;i<ops.length;i++){const op=ops[i],next=ops[i+1];if(op.type==='same')rows.push({old:op,new:op,changed:false});else if(op.type==='del'&&next?.type==='add'){rows.push({old:op,new:next,changed:true});i++;}else if(op.type==='add'&&next?.type==='del'){rows.push({old:next,new:op,changed:true});i++;}else rows.push({old:op.type==='del'?op:null,new:op.type==='add'?op:null,changed:true});}return rows}
+
+function sheetTable(rows,other,rowCount,cols,side){let body='';for(let r=0;r<rowCount;r++){body+=`<tr><th>${r+1}</th>`;for(let c=0;c<cols;c++){const value=rows[r]?.[c]??'',different=String(value)!==String(other[r]?.[c]??'');body+=`<td class="${different?`changed ${side}`:''}">${esc(value)||'&nbsp;'}</td>`}body+='</tr>'}return `<table><thead><tr><th></th>${Array.from({length:cols},(_,i)=>`<th>${columnName(i)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`}
 
 function diffLines(a,b){ const n=a.length,m=b.length,dp=Array.from({length:n+1},()=>new Uint16Array(m+1)); for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]); let i=0,j=0,out=[]; while(i<n&&j<m){if(a[i]===b[j])out.push({type:'same',text:a[i],oldNo:++i,newNo:++j});else if(dp[i+1][j]>=dp[i][j+1])out.push({type:'del',text:a[i],oldNo:++i});else out.push({type:'add',text:b[j],newNo:++j});} while(i<n)out.push({type:'del',text:a[i],oldNo:++i});while(j<m)out.push({type:'add',text:b[j],newNo:++j});return out; }
 function imageData(img,w,h){const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d',{willReadFrequently:true});x.fillStyle='white';x.fillRect(0,0,w,h);x.drawImage(img,0,0,w,h);return x.getImageData(0,0,w,h)}
@@ -149,8 +176,10 @@ function dilate(src,w,h,r){const dst=new Uint8Array(src.length);for(let y=0;y<h;
 function components(mask,w,h){const seen=new Uint8Array(mask.length),out=[];for(let s=0;s<mask.length;s++){if(!mask[s]||seen[s])continue;let q=[s],head=0,area=0,minX=w,minY=h,maxX=0,maxY=0;seen[s]=1;while(head<q.length){const p=q[head++],x=p%w,y=(p/w)|0;area++;minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);for(let yy=Math.max(0,y-1);yy<=Math.min(h-1,y+1);yy++)for(let xx=Math.max(0,x-1);xx<=Math.min(w-1,x+1);xx++){const z=yy*w+xx;if(mask[z]&&!seen[z]){seen[z]=1;q.push(z)}}}out.push({area,minX,minY,maxX,maxY})}return mergeBoxes(out,16)}
 function mergeBoxes(boxes,gap){let changed=true;while(changed){changed=false;outer:for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){const a=boxes[i],b=boxes[j];if(a.minX<=b.maxX+gap&&a.maxX+gap>=b.minX&&a.minY<=b.maxY+gap&&a.maxY+gap>=b.minY){boxes[i]={area:a.area+b.area,minX:Math.min(a.minX,b.minX),minY:Math.min(a.minY,b.minY),maxX:Math.max(a.maxX,b.maxX),maxY:Math.max(a.maxY,b.maxY)};boxes.splice(j,1);changed=true;break outer}}}return boxes}
 function downloadMarked(img,boxes,w,h){const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');x.drawImage(img,0,0,w,h);x.strokeStyle='#ef3d31';x.lineWidth=Math.max(3,w/180);boxes.forEach(b=>{x.beginPath();x.ellipse((b.minX+b.maxX)/2,(b.minY+b.maxY)/2,(b.maxX-b.minX)/2+9,(b.maxY-b.minY)/2+9,0,0,Math.PI*2);x.stroke()});const a=document.createElement('a');a.download='差分チェック結果.png';a.href=c.toDataURL('image/png');a.click()}
-function resultHeader(n,label){return `<div class="result-head"><div><p class="eyebrow">COMPARISON RESULT</p><h2>比較結果</h2></div><div class="result-count"><b>${n}</b><span>${label}</span></div></div><section class="ai-box"><div><span>CLAUDE AI</span><h3>変更の意味をAIで読み解く</h3><p>重要な変更、業務への影響、確認事項を文章で整理します。</p></div><button id="aiBtn" class="ai-button">AI分析を実行</button><div id="aiOutput" class="ai-output" hidden></div></section>`}
-function wireAi(){const btn=document.querySelector('#aiBtn');if(!btn)return;btn.onclick=async()=>{const out=document.querySelector('#aiOutput');btn.disabled=true;btn.textContent='AIが分析しています…';out.hidden=true;try{const response=await fetch('/api/analyze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(state.aiPayload)});const data=await response.json();if(!response.ok)throw new Error(data.error||'AI分析に失敗しました。');out.textContent=data.analysis;out.hidden=false;btn.textContent='もう一度AI分析';}catch(e){out.textContent=e.message;out.hidden=false;out.classList.add('failed');btn.textContent='再試行';}finally{btn.disabled=false}}}
+function resultHeader(n,label){return `<div class="result-head"><div><p class="eyebrow">SIDE-BY-SIDE PREVIEW</p><h2>旧・新 比較プレビュー</h2></div><div class="result-count"><b>${n}</b><span>${label}</span></div></div>`}
+function aiPanel(){return `<section class="ai-box"><div><span>CLAUDE AI</span><h3>変更の意味をAIで読み解く</h3><p>プレビューで確認した差を、重要度や業務影響まで文章で整理します。</p></div><button id="aiBtn" class="ai-button">AI分析を実行</button><div id="aiOutput" class="ai-output" hidden></div></section>`}
+function wireAi(autoRun=false){const btn=document.querySelector('#aiBtn');if(!btn)return;btn.onclick=async()=>{const out=document.querySelector('#aiOutput');btn.disabled=true;btn.textContent='AIが分析しています…';out.hidden=true;try{const response=await fetch('/api/analyze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(state.aiPayload)});const data=await response.json();if(!response.ok)throw new Error(data.error||'AI分析に失敗しました。');out.classList.remove('failed');out.textContent=data.analysis;out.hidden=false;btn.textContent='もう一度AI分析';}catch(e){out.textContent=e.message;out.hidden=false;out.classList.add('failed');btn.textContent='再試行';}finally{btn.disabled=false}};if(autoRun)btn.click()}
+function wirePreviewSync(){const panes=[...document.querySelectorAll('.sync-scroll')];if(panes.length!==2)return;let busy=false;panes.forEach((pane,i)=>pane.addEventListener('scroll',()=>{if(busy)return;busy=true;const other=panes[1-i];other.scrollTop=pane.scrollTop;other.scrollLeft=pane.scrollLeft;requestAnimationFrame(()=>busy=false)}))}
 function fileAsImage(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({mediaType:file.type==='image/jpg'?'image/jpeg':file.type,data:String(reader.result).split(',')[1]});reader.onerror=reject;reader.readAsDataURL(file)})}
 function showError(msg){resultEl.hidden=false;resultEl.innerHTML=`<div class="error"><b>比較できませんでした</b><p>${esc(msg)}</p></div>`;resultEl.scrollIntoView({behavior:'smooth'})}
 function formatBytes(n){return n<1024?`${n} B`:n<1048576?`${(n/1024).toFixed(1)} KB`:`${(n/1048576).toFixed(1)} MB`}
