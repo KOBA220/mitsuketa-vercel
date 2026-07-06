@@ -1,0 +1,4 @@
+@media (min-width: 761px) {
+  .dropzone.new { grid-column: 3; }
+}
+.ai-box{display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center;background:#17261f;color:white;padding:25px 30px;margin-bottom:28px}.ai-box span{font-size:9px;letter-spacing:.2em;color:#d7f235;font-weight:900}.ai-box h3{margin:5px 0;font-size:19px}.ai-box p{margin:0;color:#b9c2bd;font-size:11px}.ai-button{background:#d7f235;color:#17261f;border:0;padding:14px 22px;font-weight:900;cursor:pointer}.ai-button:disabled{opacity:.6}.ai-output{grid-column:1/-1;white-space:pre-wrap;line-height:1.9;font-size:13px;border-top:1px solid #526059;padding-top:18px}.ai-output.failed{color:#ffaaa1}@media(max-width:760px){.ai-box{grid-template-columns:1fr}.ai-output{grid-column:1}.ai-button{width:100%}}
